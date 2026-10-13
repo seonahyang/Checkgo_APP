@@ -1,0 +1,707 @@
+import React, { useState, useRef, useEffect } from 'react';
+import { X, Camera, Sparkles, ImagePlus, Trash2, Plus } from 'lucide-react';
+import { uploadReceipt } from '../receipt/receipt';
+import { createInventoryItems } from '../services/inventoryService';
+import {
+  addNewProductWishlistItem,
+  fetchWishlistPlaces,
+} from '../services/wishlistService';
+
+export default function RegistrationPanel({ 
+  isOpen, 
+  onClose, 
+  selectedPlace, 
+  currentCategory, 
+  mode = 'inventory',
+  onInventoryCreated,
+  onWishlistCreated,
+}) {
+  const receiptInputRef = useRef(null);
+  const videoRef = useRef(null);
+  const cameraStreamRef = useRef(null);
+  
+  const [isScanning, setIsScanning] = useState(false); 
+  const [isSubmitting, setIsSubmitting] = useState(false); 
+  const [receiptFile, setReceiptFile] = useState(null);
+  const [autoRegister, setAutoRegister] = useState(true);
+  const [isCameraOpen, setIsCameraOpen] = useState(false);
+  const [cameraError, setCameraError] = useState('');
+  const isWishlistMode = mode === 'wishlist';
+  const [wishlistPlaces, setWishlistPlaces] = useState([]);
+  const [wishlistForm, setWishlistForm] = useState({
+    placeId: '',
+    name: '',
+    brand: '',
+    category: '식료품',
+    unit: '개',
+    desiredQuantity: '1',
+  });
+  
+  const [commonData, setCommonData] = useState({
+    shop: '',
+    purchasedAt: new Date().toISOString().split('T')[0],
+  });
+
+  const [items, setItems] = useState([
+    {
+      id: Date.now(),
+      name: '',
+      brand: '',
+      category: '식료품',
+      quantity: '',
+      unit: '개',
+      unitPrice: '',
+      lineTotal: ''
+    }
+  ]);
+
+  useEffect(() => {
+    if (!isOpen || !currentCategory) return;
+    if (isWishlistMode) return;
+
+    setItems(prevItems => prevItems.map(item => ({
+      ...item,
+      category: currentCategory,
+    })));
+  }, [currentCategory, isOpen, isWishlistMode]);
+
+  useEffect(() => {
+    if (!isOpen || !isWishlistMode) return;
+
+    const loadWishlistOptions = async () => {
+      try {
+        const places = await fetchWishlistPlaces();
+
+        const matchedSelectedPlace = places.find(place => (
+          place.place_type === selectedPlace?.id || place.name === selectedPlace?.name
+        ));
+
+        setWishlistPlaces(places);
+        setWishlistForm(prev => ({
+          ...prev,
+          placeId: prev.placeId || matchedSelectedPlace?.id?.toString() || places[0]?.id?.toString() || '',
+        }));
+      } catch (error) {
+        console.error('위시리스트 옵션 불러오기 실패:', error);
+        alert(`위시리스트 등록 정보를 불러오지 못했습니다.\n${error.message || ''}`);
+      }
+    };
+
+    loadWishlistOptions();
+  }, [isOpen, isWishlistMode, selectedPlace]);
+
+  useEffect(() => {
+    if (!isCameraOpen) return undefined;
+
+    let isActive = true;
+
+    const startCamera = async () => {
+      try {
+        setCameraError('');
+
+        if (!navigator.mediaDevices?.getUserMedia) {
+          throw new Error('이 브라우저에서는 카메라 촬영을 지원하지 않습니다.');
+        }
+
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: { ideal: 'environment' },
+          },
+          audio: false,
+        });
+
+        if (!isActive) {
+          stream.getTracks().forEach(track => track.stop());
+          return;
+        }
+
+        cameraStreamRef.current = stream;
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          await videoRef.current.play();
+        }
+      } catch (error) {
+        console.error('카메라 실행 실패:', error);
+        setCameraError(
+          error.name === 'NotAllowedError'
+            ? '카메라 권한을 허용해주세요.'
+            : error.message || '카메라를 실행하지 못했습니다.',
+        );
+      }
+    };
+
+    startCamera();
+
+    return () => {
+      isActive = false;
+      cameraStreamRef.current?.getTracks().forEach(track => track.stop());
+      cameraStreamRef.current = null;
+    };
+  }, [isCameraOpen]);
+
+  useEffect(() => {
+    if (!isOpen) setIsCameraOpen(false);
+  }, [isOpen]);
+
+  const handleOcrClick = () => receiptInputRef.current.click();
+  const handleCameraClick = () => setIsCameraOpen(true);
+
+  const processReceiptFile = async (file) => {
+    if (!file) return;
+
+    setIsScanning(true);
+    setReceiptFile(null);
+    let analysisCompleted = false;
+
+    try {
+      const result = await uploadReceipt(file);
+      analysisCompleted = true;
+      setReceiptFile(file);
+
+      const nextCommonData = {
+        shop: result.shop || '', 
+        purchasedAt: result.purchasedAt || new Date().toISOString().split('T')[0]
+      };
+      setCommonData(nextCommonData);
+
+      if (result.items && result.items.length > 0) {
+        const formattedItems = result.items.map((item, index) => ({
+          id: Date.now() + index,
+          name: item.name || '',
+          brand: item.brand || '',
+          category: item.category || '식료품',
+          quantity: item.quantity?.toString() || '1',
+          unit: item.unit || '개',
+          unitPrice: item.price?.toString() || '',
+          lineTotal: (item.lineTotal || ((item.quantity || 1) * (item.price || 0))).toString()
+        }));
+        setItems(formattedItems);
+
+        if (autoRegister) {
+          setIsSubmitting(true);
+          await createInventoryItems({
+            items: formattedItems,
+            commonData: nextCommonData,
+            selectedPlace,
+            receiptFile: file,
+          });
+          await onInventoryCreated?.(selectedPlace);
+          alert(`${formattedItems.length}개의 물품을 카테고리별로 자동 등록했습니다!`);
+          resetForm();
+          onClose();
+          return;
+        }
+      } else {
+        alert(
+          '영수증 글자는 분석했지만 상품 목록을 찾지 못해 자동 등록하지 않았습니다. 아래에서 품목을 직접 입력해주세요.',
+        );
+        return;
+      }
+
+      alert('영수증 분석 완료!');
+    } catch (error) {
+      console.error(analysisCompleted ? '자동 등록 실패:' : '영수증 분석 실패:', error);
+      alert(
+        error.message ||
+          (analysisCompleted
+            ? '영수증은 분석했지만 자동 등록 중 오류가 발생했습니다.'
+            : '영수증 분석 중 오류가 발생했습니다.'),
+      );
+    } finally {
+      setIsScanning(false);
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleReceiptUpload = async (event) => {
+    const file = event.target.files[0];
+    event.target.value = '';
+    await processReceiptFile(file);
+  };
+
+  const handleCameraCapture = async () => {
+    const video = videoRef.current;
+    if (!video?.videoWidth || !video?.videoHeight) {
+      setCameraError('카메라 화면이 준비되지 않았습니다. 잠시 후 다시 시도해주세요.');
+      return;
+    }
+
+    const canvas = document.createElement('canvas');
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
+
+    const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.92));
+    if (!blob) {
+      setCameraError('촬영 이미지를 만들지 못했습니다.');
+      return;
+    }
+
+    const file = new File([blob], `receipt-${Date.now()}.jpg`, {
+      type: 'image/jpeg',
+    });
+    setIsCameraOpen(false);
+    await processReceiptFile(file);
+  };
+
+  const handleCommonChange = (field, value) => {
+    setCommonData(prev => ({ ...prev, [field]: value }));
+  };
+
+  const handleItemChange = (index, field, value) => {
+    setItems(prevItems => {
+      const newItems = [...prevItems]; 
+      const currentItem = { ...newItems[index], [field]: value };
+      const qty = Number(currentItem.quantity) || 0;
+      const unitPrice = Number(currentItem.unitPrice) || 0;
+      const lineTotal = Number(currentItem.lineTotal) || 0;
+      
+      if (field === 'lineTotal' && qty > 0) {
+        currentItem.unitPrice = Math.round(lineTotal / qty).toString();
+      }
+
+      if (field === 'unitPrice' && qty > 0) {
+        currentItem.lineTotal = (qty * unitPrice).toString();
+      }
+
+      if (field === 'quantity' && qty > 0) {
+        if (lineTotal > 0) {
+          currentItem.unitPrice = Math.round(lineTotal / qty).toString();
+        } else if (unitPrice > 0) {
+          currentItem.lineTotal = (qty * unitPrice).toString();
+        }
+      }
+
+      newItems[index] = currentItem;
+      
+      return newItems;
+    });
+  };
+
+  const addItem = () => {
+    setItems(prev => [
+      ...prev, 
+      { id: Date.now(), name: '', brand: '', category: '식료품', quantity: '', unit: '개', unitPrice: '', lineTotal: '' }
+    ]);
+  };
+
+  const removeItem = (indexToRemove) => {
+    setItems(prev => prev.filter((_, index) => index !== indexToRemove));
+  };
+
+  const resetForm = () => {
+    setCommonData({
+      shop: '',
+      purchasedAt: new Date().toISOString().split('T')[0],
+    });
+    setItems([
+      { id: Date.now(), name: '', brand: '', category: '식료품', quantity: '', unit: '개', unitPrice: '', lineTotal: '' }
+    ]);
+    setReceiptFile(null);
+  };
+
+  // 백엔드 담당자분의 훌륭한 저장 함수!
+  const handleRegisterAll = async () => {
+    const hasEmptyName = items.some(item => !item.name.trim());
+
+    if (hasEmptyName) {
+      alert('상품 이름을 입력해주세요.');
+      return;
+    }
+
+    setIsSubmitting(true);
+
+    try {
+      await createInventoryItems({ items, commonData, selectedPlace, receiptFile });
+      await onInventoryCreated?.(selectedPlace);
+      alert(`${items.length}개의 물품 등록 완료!`);
+      resetForm();
+      onClose();
+    } catch (error) {
+      console.error('물품 등록 실패:', error);
+      alert(`물품 등록 중 오류가 발생했습니다.\n${error.message || ''}`);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleWishlistFormChange = (field, value) => {
+    setWishlistForm(prev => ({ ...prev, [field]: value }));
+  };
+
+  const handleRegisterWishlist = async () => {
+    if (!wishlistForm.placeId) {
+      alert('장소를 선택해주세요.');
+      return;
+    }
+
+    if (!wishlistForm.name.trim()) {
+      alert('새 상품 이름을 입력해주세요.');
+      return;
+    }
+
+    setIsSubmitting(true);
+
+    try {
+      await addNewProductWishlistItem(wishlistForm);
+      await onWishlistCreated?.();
+      alert('위시리스트에 추가했습니다!');
+      setWishlistForm(prev => ({
+        ...prev,
+        name: '',
+        brand: '',
+        desiredQuantity: '1',
+      }));
+      onClose();
+    } catch (error) {
+      console.error('위시리스트 추가 실패:', error);
+      alert(`위시리스트 추가 중 오류가 발생했습니다.\n${error.message || ''}`);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const grandTotal = items.reduce((sum, item) => sum + (Number(item.lineTotal) || 0), 0);
+
+  return (
+    <div className={`fixed inset-y-0 right-0 w-full md:w-[500px] bg-white dark:bg-[#181818] shadow-[0_0_50px_rgba(0,0,0,0.1)] dark:shadow-none z-50 transform transition-transform duration-500 ease-in-out border-l border-gray-100 dark:border-[#2F2F2F] flex flex-col ${isOpen ? 'translate-x-0' : 'translate-x-full'}`}>
+
+      <div className="flex items-center justify-between p-8 pb-4 border-b border-gray-50 dark:border-[#2F2F2F] flex-shrink-0">
+        <div>
+          <h2 className="text-2xl font-black tracking-tight">
+            {isWishlistMode ? '위시리스트 상품 등록' : '품목 스마트 등록'}
+          </h2>
+          <p className="text-xs text-gray-400 font-medium mt-1 uppercase tracking-widest">
+            {isWishlistMode ? 'New Wishlist Entry' : 'New Inventory Entry'}
+          </p>
+        </div>
+        <button onClick={onClose} className="p-3 hover:bg-gray-50 dark:hover:bg-gray-800 rounded-full transition-all active:scale-90">
+          <X size={24} className="text-gray-400 hover:text-black dark:hover:text-white" />
+        </button>
+      </div>
+      
+      {/* 프로필 표시 영역 싹 지움! 아주 깔끔해졌습니다! */}
+
+      <div className="p-8 overflow-y-auto flex-1 space-y-8 custom-scrollbar">
+        {isWishlistMode ? (
+          <WishlistRegisterForm
+            places={wishlistPlaces}
+            form={wishlistForm}
+            isSubmitting={isSubmitting}
+            onChange={handleWishlistFormChange}
+            onCancel={onClose}
+            onSubmit={handleRegisterWishlist}
+          />
+        ) : (
+          <>
+        
+        <input type="file" accept="image/*" className="hidden" ref={receiptInputRef} onChange={handleReceiptUpload} />
+
+        <div className={`p-10 border-3 border-dashed rounded-[2rem] flex flex-col items-center justify-center gap-4 transition-all shadow-sm relative overflow-hidden ${isScanning ? 'border-blue-500 bg-blue-50/50 dark:bg-blue-900/20' : 'border-gray-100 dark:border-gray-800 hover:border-blue-400 hover:bg-blue-50/20 dark:hover:bg-blue-900/10 group'}`}>
+          {isScanning ? (
+            <>
+              <div className="w-16 h-16 rounded-[1.5rem] bg-blue-600 flex items-center justify-center text-white shadow-xl animate-pulse">
+                <Sparkles size={32} className="animate-spin-slow" />
+              </div>
+              <div className="text-center">
+                <p className="text-sm font-black text-blue-600 dark:text-blue-400">AI가 영수증을 분석 중입니다...</p>
+                <p className="text-[11px] mt-1 font-medium text-gray-500">잠시만 기다려주세요</p>
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="w-16 h-16 rounded-[1.5rem] bg-gray-50 dark:bg-gray-800 flex items-center justify-center transition-all shadow-xl group-hover:scale-110">
+                <Camera size={32} className="text-gray-400 dark:text-gray-500" />
+              </div>
+              <div className="text-center">
+                <p className="text-sm font-black text-gray-600 dark:text-gray-300">영수증 촬영/업로드</p>
+                <p className="text-[11px] mt-1 font-medium text-gray-500">한 장의 영수증에서 다수의 물품을 읽어냅니다</p>
+              </div>
+              <div className="flex gap-3 mt-2 z-10">
+                <button type="button" onClick={handleCameraClick} disabled={isScanning} className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-xl text-xs font-bold hover:bg-blue-700 disabled:opacity-60 transition-all shadow-lg shadow-blue-500/20 active:scale-95">
+                  <Camera size={14} /> 바로 촬영
+                </button>
+                <button type="button" onClick={handleOcrClick} disabled={isScanning} className="flex items-center gap-2 px-4 py-2 bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 border border-gray-200 dark:border-gray-700 rounded-xl text-xs font-bold hover:bg-gray-50 dark:hover:bg-gray-700 disabled:opacity-60 transition-all shadow-sm active:scale-95">
+                  <ImagePlus size={14} /> 갤러리
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+
+        <label className="flex items-center justify-between gap-4 px-5 py-4 bg-blue-50/60 dark:bg-blue-900/10 border border-blue-100 dark:border-blue-900/30 rounded-2xl cursor-pointer">
+          <div>
+            <p className="text-sm font-black text-blue-700 dark:text-blue-300">분석 후 자동 등록</p>
+            <p className="text-[11px] mt-1 font-medium text-blue-500/80 dark:text-blue-300/70">
+              품목을 식료품·생필품·화장품으로 분류해 바로 저장합니다.
+            </p>
+          </div>
+          <input
+            type="checkbox"
+            checked={autoRegister}
+            onChange={(event) => setAutoRegister(event.target.checked)}
+            className="w-5 h-5 accent-blue-600 flex-shrink-0"
+          />
+        </label>
+
+        <div className="p-6 bg-gray-50 dark:bg-gray-900/50 rounded-3xl border border-gray-100 dark:border-gray-800 space-y-4">
+          <div className="flex items-center gap-2 mb-2">
+            <Sparkles size={16} className="text-blue-500" />
+            <h3 className="font-black text-sm tracking-tight">영수증 공통 정보</h3>
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <InputGroup label="구매 쇼핑몰(스토어)" placeholder="예: 이마트" value={commonData.shop} onChange={(e) => handleCommonChange('shop', e.target.value)} />
+            <InputGroup label="구매 일자" type="date" value={commonData.purchasedAt} onChange={(e) => handleCommonChange('purchasedAt', e.target.value)} />
+          </div>
+        </div>
+
+        <div className="space-y-6">
+          <div className="flex items-center justify-between">
+            <h3 className="font-black text-sm tracking-tight flex items-center gap-2">
+              <span className="w-2 h-2 bg-blue-500 rounded-full"></span> 등록할 물품 목록 ({items.length}개)
+            </h3>
+          </div>
+
+          {items.map((item, index) => (
+            <div key={item.id} className="relative p-6 border-2 border-gray-100 dark:border-gray-800 rounded-3xl space-y-5 bg-white dark:bg-transparent group">
+              
+              {items.length > 1 && (
+                <button 
+                  onClick={() => removeItem(index)} 
+                  className="absolute top-4 right-4 p-2 text-gray-300 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-xl transition-all"
+                >
+                  <Trash2 size={18} />
+                </button>
+              )}
+
+              <div className="grid grid-cols-2 gap-4 pt-2">
+                <InputGroup label="브랜드 (선택)" placeholder="예: N사" value={item.brand} onChange={(e) => handleItemChange(index, 'brand', e.target.value)} />
+                <InputGroup label="상품 이름" placeholder="예: 닭가슴살" value={item.name} onChange={(e) => handleItemChange(index, 'name', e.target.value)} />
+              </div>
+
+              <div className="grid grid-cols-3 gap-3">
+                <div className="col-span-1">
+                  <InputGroup label="수량" type="number" placeholder="0" value={item.quantity} onChange={(e) => handleItemChange(index, 'quantity', e.target.value)} />
+                </div>
+                <div className="col-span-1 space-y-2">
+                  <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest">단위</label>
+                  <select value={item.unit} onChange={(e) => handleItemChange(index, 'unit', e.target.value)} className="w-full p-3.5 text-sm rounded-xl border border-gray-100 dark:bg-[#2A2A2A] dark:border-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500/50 font-bold transition-all">
+                    <option>개</option>
+                    <option>팩</option>
+                    <option>g</option>
+                    <option>ml</option>
+                  </select>
+                </div>
+                <div className="col-span-1 space-y-2">
+                  <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest">카테고리</label>
+                  <select value={item.category} onChange={(e) => handleItemChange(index, 'category', e.target.value)} className="w-full p-3.5 text-sm rounded-xl border border-gray-100 dark:bg-[#2A2A2A] dark:border-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500/50 font-bold transition-all">
+                    <option>식료품</option>
+                    <option>생필품</option>
+                    <option>화장품</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-4 pb-2">
+                <InputGroup label="개당 가격(단가)" type="number" placeholder="₩ 0" value={item.unitPrice} onChange={(e) => handleItemChange(index, 'unitPrice', e.target.value)} />
+                <InputGroup label="해당 상품 총액" type="number" placeholder="₩ 0" value={item.lineTotal} onChange={(e) => handleItemChange(index, 'lineTotal', e.target.value)} />
+              </div>
+            </div>
+          ))}
+
+          <button 
+            onClick={addItem}
+            className="w-full py-4 border-2 border-dashed border-gray-200 dark:border-gray-700 text-gray-500 dark:text-gray-400 font-bold rounded-3xl hover:bg-gray-50 dark:hover:bg-gray-800 hover:text-blue-500 hover:border-blue-200 transition-all flex items-center justify-center gap-2"
+          >
+            <Plus size={18} />
+            <span>품목 수동 추가</span>
+          </button>
+        </div>
+
+        <div className="pt-6 border-t border-gray-100 dark:border-gray-800">
+          <div className="flex justify-between items-end mb-6 px-2">
+            <span className="text-sm font-black text-gray-400">총 영수증 결제액</span>
+            <span className="text-2xl font-black text-blue-600 dark:text-blue-400 tracking-tighter">₩ {grandTotal.toLocaleString()}</span>
+          </div>
+
+          <div className="grid grid-cols-2 gap-4">
+            <button onClick={onClose} className="py-4 bg-gray-50 dark:bg-gray-800 text-gray-500 font-black rounded-2xl hover:bg-gray-100 transition-all text-sm uppercase tracking-widest">Cancel</button>
+            <button 
+              onClick={handleRegisterAll}
+              disabled={isSubmitting}
+              className="py-4 bg-blue-600 text-white rounded-2xl font-black hover:bg-blue-700 disabled:opacity-60 disabled:cursor-not-allowed transition-all shadow-xl shadow-blue-500/20 text-sm uppercase tracking-widest"
+            >
+              {isSubmitting ? '저장 중...' : 'Supabase에 저장'}
+            </button>
+          </div>
+        </div>
+
+          </>
+        )}
+      </div>
+
+      {isCameraOpen && (
+        <div className="fixed inset-0 z-[70] bg-black flex flex-col">
+          <div className="flex items-center justify-between px-5 py-4 text-white">
+            <div>
+              <p className="font-black">영수증 촬영</p>
+              <p className="text-xs text-white/60 mt-1">영수증 전체가 화면 안에 들어오게 맞춰주세요.</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setIsCameraOpen(false)}
+              className="p-2 rounded-full bg-white/10 hover:bg-white/20"
+              aria-label="카메라 닫기"
+            >
+              <X size={24} />
+            </button>
+          </div>
+
+          <div className="relative flex-1 min-h-0 flex items-center justify-center overflow-hidden">
+            <video
+              ref={videoRef}
+              playsInline
+              muted
+              className="w-full h-full object-contain"
+            />
+            <div className="absolute inset-6 border-2 border-white/50 rounded-3xl pointer-events-none" />
+            {cameraError && (
+              <div className="absolute inset-x-6 top-6 p-4 bg-red-500/90 text-white text-sm font-bold rounded-2xl">
+                {cameraError}
+              </div>
+            )}
+          </div>
+
+          <div className="p-6 flex justify-center bg-black">
+            <button
+              type="button"
+              onClick={handleCameraCapture}
+              disabled={!!cameraError}
+              className="w-20 h-20 rounded-full border-4 border-white flex items-center justify-center disabled:opacity-40"
+              aria-label="영수증 촬영하기"
+            >
+              <span className="w-16 h-16 rounded-full bg-white active:scale-90 transition-transform" />
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function WishlistRegisterForm({ places, form, isSubmitting, onChange, onCancel, onSubmit }) {
+  return (
+    <div className="space-y-6">
+      <div className="p-6 bg-blue-50/60 dark:bg-blue-900/10 rounded-3xl border border-blue-100 dark:border-blue-900/30">
+        <p className="text-sm font-black text-blue-700 dark:text-blue-300">아직 재고에 없는 구매 후보를 등록하세요.</p>
+        <p className="text-xs text-blue-500/80 dark:text-blue-300/70 mt-1 font-medium">
+          기존 재고 상품은 인벤토리 상세 화면에서 위시리스트로 보낼 예정입니다.
+        </p>
+      </div>
+
+      <div className="space-y-4">
+        <SelectGroup
+          label="필요한 장소"
+          value={form.placeId}
+          onChange={(event) => onChange('placeId', event.target.value)}
+        >
+          {places.map(place => (
+            <option key={place.id} value={place.id}>{place.name}</option>
+          ))}
+        </SelectGroup>
+
+        <div className="space-y-4">
+          <div className="grid grid-cols-2 gap-4">
+            <InputGroup
+              label="브랜드 (선택)"
+              placeholder="예: 하림"
+              value={form.brand}
+              onChange={(event) => onChange('brand', event.target.value)}
+            />
+            <InputGroup
+              label="상품 이름"
+              placeholder="예: 닭가슴살"
+              value={form.name}
+              onChange={(event) => onChange('name', event.target.value)}
+            />
+          </div>
+
+          <div className="grid grid-cols-2 gap-4">
+            <SelectGroup
+              label="카테고리"
+              value={form.category}
+              onChange={(event) => onChange('category', event.target.value)}
+            >
+              <option>식료품</option>
+              <option>생필품</option>
+              <option>화장품</option>
+            </SelectGroup>
+            <SelectGroup
+              label="단위"
+              value={form.unit}
+              onChange={(event) => onChange('unit', event.target.value)}
+            >
+              <option>개</option>
+              <option>팩</option>
+              <option>g</option>
+              <option>ml</option>
+              <option>kg</option>
+              <option>롤</option>
+            </SelectGroup>
+          </div>
+        </div>
+
+        <InputGroup
+          label="필요 수량"
+          type="number"
+          placeholder="1"
+          value={form.desiredQuantity}
+          onChange={(event) => onChange('desiredQuantity', event.target.value)}
+        />
+      </div>
+
+      <div className="grid grid-cols-2 gap-4 pt-6 border-t border-gray-100 dark:border-gray-800">
+        <button onClick={onCancel} className="py-4 bg-gray-50 dark:bg-gray-800 text-gray-500 font-black rounded-2xl hover:bg-gray-100 transition-all text-sm uppercase tracking-widest">
+          Cancel
+        </button>
+        <button
+          onClick={onSubmit}
+          disabled={isSubmitting || places.length === 0}
+          className="py-4 bg-blue-600 text-white rounded-2xl font-black hover:bg-blue-700 disabled:opacity-60 disabled:cursor-not-allowed transition-all shadow-xl shadow-blue-500/20 text-sm uppercase tracking-widest"
+        >
+          {isSubmitting ? 'Adding...' : 'Add Wishlist'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function SelectGroup({ label, value, onChange, children }) {
+  return (
+    <div className="space-y-2">
+      <label className="text-[10px] font-black text-gray-400 dark:text-gray-500 uppercase tracking-widest">{label}</label>
+      <select
+        value={value}
+        onChange={onChange}
+        className="w-full p-3.5 text-sm rounded-xl border border-gray-100 dark:bg-[#2A2A2A] dark:border-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all font-bold shadow-inner"
+      >
+        {children}
+      </select>
+    </div>
+  );
+}
+
+function InputGroup({ label, placeholder, type = "text", value, onChange }) {
+  return (
+    <div className="space-y-2">
+      <label className="text-[10px] font-black text-gray-400 dark:text-gray-500 uppercase tracking-widest">{label}</label>
+      <input 
+        type={type} 
+        placeholder={placeholder} 
+        value={value}        
+        onChange={onChange}   
+        className="w-full p-3.5 text-sm rounded-xl border border-gray-100 dark:bg-[#2A2A2A] dark:border-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all placeholder:text-gray-300 dark:placeholder:text-gray-600 font-bold shadow-inner" 
+      />
+    </div>
+  );
+}
